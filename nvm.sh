@@ -63,13 +63,11 @@ nvm_command_info() {
   local INFO
   COMMAND="${1}"
   if type "${COMMAND}" | nvm_grep -q hashed; then
-    INFO="$(type "${COMMAND}" | command sed -E 's/\(|\)//g' | command awk '{print $4}')"
+    INFO="$(type "${COMMAND}" | command awk '{ gsub(/[()]/,""); print $4 }')"
   elif type "${COMMAND}" | nvm_grep -q aliased; then
-    # shellcheck disable=SC2230
-    INFO="$(which "${COMMAND}") ($(type "${COMMAND}" | command awk '{ $1=$2=$3=$4="" ;print }' | command sed -e 's/^\ *//g' -Ee "s/\`|'//g"))"
+    INFO="$(which "${COMMAND}") ($(type "${COMMAND}" | command awk "{ \$1=\$2=\$3=\$4=\"\"; sub(/^ */, \"\"); gsub(/[\\\`']/, \"\"); print}"))"
   elif type "${COMMAND}" | nvm_grep -q "^${COMMAND} is an alias for"; then
-    # shellcheck disable=SC2230
-    INFO="$(which "${COMMAND}") ($(type "${COMMAND}" | command awk '{ $1=$2=$3=$4=$5="" ;print }' | command sed 's/^\ *//g'))"
+    INFO="$(which "${COMMAND}") ($(type "${COMMAND}" | command awk "{ \$1=\$2=\$3=\$4=\$5=\"\"; sub(/^ */, \"\"); print }"))"
   elif type "${COMMAND}" | nvm_grep -q "^${COMMAND} is /"; then
     INFO="$(type "${COMMAND}" | command awk '{print $3}')"
   else
@@ -87,7 +85,7 @@ nvm_has_colors() {
 }
 
 nvm_curl_libz_support() {
-  curl -V 2>/dev/null | nvm_grep "^Features:" | nvm_grep -q "libz"
+  curl -V 2>/dev/null | command awk '/^Features:.*libz/ { found=1; exit } END { exit (found ? 0 : 1) }'
 }
 
 nvm_curl_use_compression() {
@@ -534,9 +532,13 @@ $(nvm_wrap_with_color_code 'y' "${warn_text}")"
 nvm_process_nvmrc() {
   local NVMRC_PATH
   NVMRC_PATH="$1"
-  local lines
 
-  lines=$(command sed 's/#.*//' "$NVMRC_PATH" | command sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | nvm_grep -v '^$')
+  local lines
+  lines=$(command awk '{
+    sub(/#.*/, "")
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+    if (length($0) > 0) print
+  }' "$NVMRC_PATH")
 
   if [ -z "$lines" ]; then
     nvm_nvmrc_invalid_msg "${lines}"
@@ -1995,7 +1997,28 @@ nvm_print_implicit_alias() {
       NVM_IOJS_VERSION="$(${NVM_COMMAND})" &&:
       EXIT_CODE="$?"
       if [ "_${EXIT_CODE}" = "_0" ]; then
-        NVM_IOJS_VERSION="$(nvm_echo "${NVM_IOJS_VERSION}" | command sed "s/^${NVM_IMPLICIT}-//" | nvm_grep -e '^v' | command cut -c2- | command cut -d . -f 1,2 | uniq | command tail -1)"
+        NVM_IOJS_VERSION="$(nvm_echo "${NVM_IOJS_VERSION}" | command awk -v prefix="^${NVM_IMPLICIT}-" '
+          BEGIN {
+            last = ""
+            prev = ""
+          }
+          {
+            sub(prefix, "")
+            # skip lines that do not start with "v"
+            if ($0 !~ /^v/) next
+            # remove leading "v"
+            sub(/^v/, "")
+            # keep only major.minor
+            split($0, parts, "\\.")
+            short = parts[1] "." parts[2]
+            # replicate "uniq" by only updating if changed
+            if (short != prev) {
+              last = short
+              prev = short
+            }
+          }
+          END { print last }
+        ')"
       fi
 
       if [ "_$NVM_IOJS_VERSION" = "_N/A" ]; then
@@ -2017,7 +2040,7 @@ nvm_print_implicit_alias() {
 
       nvm_is_zsh && setopt local_options shwordsplit
 
-      LAST_TWO=$($NVM_COMMAND | nvm_grep -e '^v' | command cut -c2- | command cut -d . -f 1,2 | uniq)
+      LAST_TWO="$($NVM_COMMAND | command awk '/^v/ { sub(/^v/, ""); split($0, parts, "\\."); short=parts[1]"."parts[2]; if (!seen[short]++) print short }')"
     ;;
   esac
   local MINOR
@@ -2734,13 +2757,19 @@ nvm_npm_global_modules() {
   local NPMLIST
   local VERSION
   VERSION="$1"
-  NPMLIST=$(nvm use "${VERSION}" >/dev/null && npm list -g --depth=0 2>/dev/null | command sed -e '1d' -e '/UNMET PEER DEPENDENCY/d')
+  NPMLIST="$(nvm use "${VERSION}" >/dev/null && npm list -g --depth=0 2>/dev/null | command awk 'NR == 1 { next } /UNMET PEER DEPENDENCY/ { next } { print }')"
 
   local INSTALLS
-  INSTALLS=$(nvm_echo "${NPMLIST}" | command sed -e '/ -> / d' -e '/\(empty\)/ d' -e 's/^.* \(.*@[^ ]*\).*/\1/' -e '/^npm@[^ ]*.*$/ d' | command xargs)
+  INSTALLS="$(nvm_echo "${NPMLIST}" | command awk '
+      / -> /         { next }
+      /\(empty\)/    { next }
+      /^npm@/        { next }
+      { sub(/^.* (.*@[^ ]*).*/,"\\1"); if (length($0) > 0) print }
+    ' | command xargs
+  )"
 
   local LINKS
-  LINKS="$(nvm_echo "${NPMLIST}" | command sed -n 's/.* -> \(.*\)/\1/ p')"
+  LINKS="$(nvm_echo "${NPMLIST}" | command awk '/ -> / { sub(/.* -> /,""); print } ')"
 
   nvm_echo "${INSTALLS} //// ${LINKS}"
 }
